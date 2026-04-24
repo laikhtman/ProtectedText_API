@@ -1,13 +1,32 @@
+/**
+ * @module site-store
+ * Persistent store for encrypted note sites.
+ *
+ * Data is serialised as a JSON file on disk. All write operations are serialised
+ * through a single Promise chain (`#writeChain`) so concurrent requests never
+ * produce interleaved writes or corrupt the file.
+ *
+ * The `auth` field (salt + scrypt hash) is stripped from every value returned to
+ * callers — it is intentionally kept server-side only.
+ */
+
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { hashAuthToken, verifyAuthToken } from '../lib/auth.js';
 
+/**
+ * Returns a copy of `site` with the `auth` field removed, safe to send to clients.
+ *
+ * @param {{ auth: unknown, [key: string]: unknown }} site
+ * @returns {Record<string, unknown>}
+ */
 function serializeSite(site) {
   const { auth, ...publicSite } = site;
   return publicSite;
 }
 
+/** Thrown when a write or delete would violate optimistic-concurrency rules. */
 export class ConflictError extends Error {
   constructor(message) {
     super(message);
@@ -15,6 +34,7 @@ export class ConflictError extends Error {
   }
 }
 
+/** Thrown when the supplied `authToken` does not match the stored credential. */
 export class AuthError extends Error {
   constructor(message) {
     super(message);
@@ -23,15 +43,37 @@ export class AuthError extends Error {
 }
 
 export class SiteStore {
+  /** @type {string} Absolute path to the JSON data file. */
   #dataFile;
+
+  /**
+   * In-memory site map, keyed by normalised siteId.
+   * @type {Map<string, Record<string, unknown>>}
+   */
   #sites = new Map();
+
+  /** Whether the data file has been loaded into `#sites` yet. */
   #loaded = false;
+
+  /**
+   * Serialised write queue. All mutations are appended as `.then()` callbacks so
+   * they execute one at a time, preventing concurrent file writes.
+   * @type {Promise<unknown>}
+   */
   #writeChain = Promise.resolve();
 
+  /**
+   * @param {string} dataFile - Path to the JSON persistence file.
+   */
   constructor(dataFile) {
     this.#dataFile = dataFile;
   }
 
+  /**
+   * Lazy-loads data from disk on the first call.
+   * Creates the parent directory if it does not yet exist.
+   * A missing file is treated as an empty store (not an error).
+   */
   async #ensureLoaded() {
     if (this.#loaded) {
       return;
@@ -55,6 +97,9 @@ export class SiteStore {
     this.#loaded = true;
   }
 
+  /**
+   * Writes the current in-memory state back to disk as formatted JSON.
+   */
   async #persist() {
     const payload = {
       sites: [...this.#sites.values()]
@@ -64,17 +109,51 @@ export class SiteStore {
     await fs.writeFile(this.#dataFile, serialized, 'utf8');
   }
 
+  /**
+   * Appends `operation` to the write chain so it runs after all currently
+   * enqueued writes complete. Both resolve and reject paths advance the chain
+   * so a single failure does not permanently stall subsequent operations.
+   *
+   * @template T
+   * @param {() => Promise<T>} operation
+   * @returns {Promise<T>}
+   */
   async #withWriteLock(operation) {
     this.#writeChain = this.#writeChain.then(operation, operation);
     return this.#writeChain;
   }
 
+  /**
+   * Retrieves a site by ID, stripping the `auth` field before returning.
+   *
+   * @param {string} siteId - Normalised siteId.
+   * @returns {Promise<Record<string, unknown>|null>} Public site object, or `null` if not found.
+   */
   async getSite(siteId) {
     await this.#ensureLoaded();
     const site = this.#sites.get(siteId);
     return site ? serializeSite(site) : null;
   }
 
+  /**
+   * Creates a new site or updates an existing one.
+   *
+   * Create rules:
+   * - `expectedVersion` must be `0`; if the site already exists a ConflictError is thrown.
+   * - A fresh scrypt hash of `authToken` is stored for future verification.
+   *
+   * Update rules:
+   * - `authToken` must match the stored credential (AuthError on mismatch).
+   * - `expectedVersion` must equal the current version (ConflictError on mismatch).
+   * - The stored `version` is incremented by 1.
+   *
+   * @param {string} siteId
+   * @param {{ ciphertext: string, iv: string, salt: string, algorithm: string,
+   *           kdf: string, authToken: string, expectedVersion?: number,
+   *           noteHash?: string }} input
+   * @returns {Promise<Record<string, unknown>>} The saved site (without `auth`).
+   * @throws {ConflictError|AuthError}
+   */
   async putSite(siteId, input) {
     await this.#ensureLoaded();
 
@@ -140,6 +219,14 @@ export class SiteStore {
     });
   }
 
+  /**
+   * Deletes a site. Both `authToken` and `expectedVersion` must be correct.
+   *
+   * @param {string} siteId
+   * @param {{ authToken: string, expectedVersion?: number }} input
+   * @returns {Promise<boolean>} `true` if deleted, `false` if the site did not exist.
+   * @throws {ConflictError|AuthError}
+   */
   async deleteSite(siteId, input) {
     await this.#ensureLoaded();
 
