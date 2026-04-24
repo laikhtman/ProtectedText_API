@@ -80,6 +80,8 @@ Pull every tab from any [protectedtext.com](https://www.protectedtext.com/) site
 
 > **Requirements:** Python ≥ 3.10. Dependencies are installed automatically on first run.
 
+### Single site
+
 ```bash
 python export_site.py mysite
 ```
@@ -96,6 +98,42 @@ Password: ••••••••
    ├── Work notes.txt
    └── ... 30 more
 ```
+
+### Batch export from a CSV
+
+```bash
+python export_site.py --import sites.csv
+```
+
+CSV format — no header row required:
+
+```csv
+siteId,password[,masterDirectory]
+```
+
+| Column | Required | Description |
+|--------|----------|-------------|
+| 1 — `siteId` | ✅ | The protectedtext.com site identifier |
+| 2 — `password` | ✅ | The site password |
+| 3 — `masterDirectory` | optional | Parent folder for output. Files go to `<masterDir>/<siteId>/` instead of `./<siteId>/` |
+
+**Example `sites.csv`:**
+
+```csv
+mynotes,secret123
+worknotes,pass456,backup
+family,pa$$w0rd,D:\exports
+```
+
+Running `--import sites.csv` on the above would create:
+
+```
+backup\worknotes\*.txt
+D:\exports\family\*.txt
+mynotes\*.txt
+```
+
+Each site is fetched independently — a failure on one site is reported and the batch continues.
 
 A folder named after the site ID is created in your working directory.  
 Each tab becomes a `.txt` file named after the tab's first line (the title).
