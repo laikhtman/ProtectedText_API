@@ -2,18 +2,37 @@
 """
 export_site.py — Export a ProtectedText.com site to local .txt files.
 
-Usage:
+Single-site usage:
     python export_site.py [siteId]
 
-Each tab in the site becomes a .txt file inside a folder named after the siteId.
+Batch usage (CSV):
+    python export_site.py --import sites.csv
+
+CSV format (no header row required):
+    siteId,password[,masterDirectory]
+
+    Column 1 — site ID  (required)
+    Column 2 — password (required)
+    Column 3 — master directory (optional).
+               When given, files are saved to <masterDirectory>/<siteId>/
+               instead of the default ./<siteId>/
+
+Example CSV:
+    mynotes,secret123
+    worknotes,pass456,backup
+    family,pa$$w0rd,D:\\exports
+
+Each tab in the site becomes a .txt file inside the output folder.
 The file name is the first non-whitespace line of the tab content (the tab title).
 """
 
 import sys
 import os
 import re
+import csv
 import hashlib
 import base64
+import argparse
 import getpass
 import urllib.request
 import urllib.error
@@ -225,19 +244,19 @@ def fetch_site_html(site_id: str) -> dict:
     with urllib.request.urlopen(req, timeout=15) as resp:
         html = resp.read().decode("utf-8", errors="replace")
 
-    # Check if this is a new (non-existent) site — no ClientState call present
+    # No ClientState at all → page is blank / unavailable
     if "new ClientState(" not in html:
         return {"is_new": True, "site_url": f"/{site_id.lower()}", "e_content": None}
 
     # Extract siteURL (1st arg, quoted)
     m_site = re.search(r'new ClientState\s*\(\s*"([^"]+)"', html)
-    # Extract eContent (2nd arg, quoted, may span multiple lines)
+    # Extract eContent (2nd arg, quoted — allow empty string for new/blank sites)
     m_ec = re.search(
-        r'new ClientState\s*\(\s*"[^"]+"\s*,\s*"([^"]+)"', html, re.DOTALL
+        r'new ClientState\s*\(\s*"[^"]+"\s*,\s*"([^"]*)"', html, re.DOTALL
     )
     # Extract isNew (3rd arg, true/false)
     m_rest = re.search(
-        r'new ClientState\s*\(\s*"[^"]+"\s*,\s*"[^"]+"\s*,\s*(true|false)',
+        r'new ClientState\s*\(\s*"[^"]+"\s*,\s*"[^"]*"\s*,\s*(true|false)',
         html, re.DOTALL,
     )
 
@@ -245,74 +264,78 @@ def fetch_site_html(site_id: str) -> dict:
         raise ValueError("Could not parse ClientState from page HTML.")
 
     e_content = re.sub(r"\s+", "", m_ec.group(1))  # strip all whitespace
-    is_new    = m_rest.group(1) == "true" if m_rest else False
+    is_new    = (m_rest.group(1) == "true") if m_rest else (e_content == "")
 
     return {
-        "is_new":   is_new,
-        "site_url": m_site.group(1),   # e.g. "/kaseyguidelines"
-        "e_content": e_content,
+        "is_new":    is_new,
+        "site_url":  m_site.group(1),   # e.g. "/kaseyguidelines"
+        "e_content": e_content or None,
     }
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Core export logic (reused by both single-site and batch modes)
 # ---------------------------------------------------------------------------
 
-def main():
-    # --- Site ID ---
-    if len(sys.argv) >= 2:
-        site_id = sys.argv[1].strip()
-    else:
-        site_id = input("Enter site ID: ").strip()
+def export_one_site(site_id: str, password: str, master_dir: str | None = None) -> bool:
+    """
+    Fetch, decrypt, and export a single protectedtext.com site to .txt files.
 
-    if not site_id:
-        print("Error: site ID cannot be empty.")
-        sys.exit(1)
+    Args:
+        site_id:    The protectedtext.com site identifier.
+        password:   The site password.
+        master_dir: Optional parent directory. When given, files are written to
+                    <master_dir>/<site_id>/. When None, files are written to
+                    ./<site_id>/ relative to the current working directory.
 
-    # --- Password ---
-    password = getpass.getpass(f"Password for '{site_id}': ")
-    if not password:
-        print("Error: password cannot be empty.")
-        sys.exit(1)
+    Returns:
+        True on success, False on any error (error is printed to stdout).
+    """
+    print(f"\n{'─'*50}")
+    print(f"[>] Site: {site_id}")
 
     # --- Fetch ---
     print(f"[*] Fetching https://www.protectedtext.com/{site_id} ...")
     try:
         data = fetch_site_html(site_id)
     except urllib.error.HTTPError as e:
-        print(f"Error: HTTP {e.code} — {e.reason}")
-        sys.exit(1)
+        print(f"    Error: HTTP {e.code} — {e.reason}")
+        return False
     except Exception as e:
-        print(f"Error fetching site: {e}")
-        sys.exit(1)
+        print(f"    Error fetching site: {e}")
+        return False
 
     if data["is_new"]:
-        print("This site does not exist yet (empty / new site).")
-        sys.exit(0)
+        print("    This site does not exist yet (empty / new site). Skipping.")
+        return False
 
     e_content = data["e_content"]
     if not e_content:
-        print("Error: no encrypted content found in page.")
-        sys.exit(1)
+        print("    Error: no encrypted content found in page.")
+        return False
 
     # --- Decrypt ---
-    # siteHash = SHA512(site_url) where site_url is e.g. "/kaseyguidelines"
     site_hash = sha512_hex(data["site_url"])
     print(f"[*] Decrypting (siteHash = {site_hash[:16]}...)...")
     content = decrypt_content(e_content, password, site_hash)
 
     if content is None:
-        print("\nError: wrong password or unsupported encryption scheme.")
-        sys.exit(1)
+        print("\n    Error: wrong password or unsupported encryption scheme.")
+        return False
 
     # --- Parse tabs ---
     tabs = parse_tabs(content)
     print(f"[*] Found {len(tabs)} tab(s).")
 
-    # --- Export ---
-    out_folder = site_id
+    # --- Resolve output folder ---
+    if master_dir:
+        out_folder = os.path.join(master_dir, site_id)
+    else:
+        out_folder = site_id
+
     os.makedirs(out_folder, exist_ok=True)
 
+    # --- Export ---
     for i, (title, body) in enumerate(tabs, 1):
         filename = safe_filename(title)
         filepath = unique_path(out_folder, filename)
@@ -320,7 +343,139 @@ def main():
             f.write(body)
         print(f"    [{i}/{len(tabs)}] {os.path.basename(filepath)}")
 
-    print(f"\n✓ Exported {len(tabs)} file(s) to '{out_folder}{os.sep}'")
+    print(f"✓  Exported {len(tabs)} file(s) to '{out_folder}{os.sep}'")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Batch CSV import
+# ---------------------------------------------------------------------------
+
+# Column indices in the CSV
+_COL_SITE_ID  = 0
+_COL_PASSWORD = 1
+_COL_MASTER   = 2
+
+# First-row values that indicate a header row — skip automatically
+_HEADER_NAMES = {"siteid", "site_id", "site", "id", "name"}
+
+
+def import_from_csv(csv_path: str) -> None:
+    """
+    Read a CSV file and export every site listed in it.
+
+    Expected columns (no header required):
+        1. site ID   — required
+        2. password  — required
+        3. master directory — optional; when present, output goes to <master>/<siteId>/
+
+    Rows with fewer than two columns, blank site IDs, or blank passwords are skipped.
+    A likely header row (first cell matches common header names) is skipped automatically.
+    Failures on individual sites are reported but do not stop the batch.
+    """
+    if not os.path.isfile(csv_path):
+        print(f"Error: file not found: {csv_path}")
+        sys.exit(1)
+
+    rows = []
+    with open(csv_path, newline="", encoding="utf-8-sig") as fh:
+        reader = csv.reader(fh)
+        for lineno, row in enumerate(reader, 1):
+            # Skip short or fully-blank rows
+            if len(row) < 2:
+                continue
+
+            site_id  = row[_COL_SITE_ID].strip()
+            password = row[_COL_PASSWORD].strip()
+            master   = row[_COL_MASTER].strip() if len(row) > _COL_MASTER else ""
+
+            # Skip likely header row
+            if lineno == 1 and site_id.lower() in _HEADER_NAMES:
+                print(f"[*] Skipping header row: {row}")
+                continue
+
+            if not site_id or not password:
+                print(f"[!] Line {lineno}: empty site ID or password — skipped.")
+                continue
+
+            rows.append((site_id, password, master or None))
+
+    if not rows:
+        print("No valid rows found in CSV.")
+        sys.exit(0)
+
+    print(f"[*] Found {len(rows)} site(s) in '{csv_path}'.")
+
+    success_count = 0
+    for site_id, password, master_dir in rows:
+        ok = export_one_site(site_id, password, master_dir)
+        if ok:
+            success_count += 1
+
+    print(f"\n{'═'*50}")
+    print(f"✓  Batch complete: {success_count}/{len(rows)} site(s) exported successfully.")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="export_site.py",
+        description="Export ProtectedText.com sites to local .txt files.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  # Single site (interactive password prompt)
+  python export_site.py mynotes
+
+  # Batch export from a CSV file
+  python export_site.py --import sites.csv
+
+CSV format:
+  siteId,password[,masterDirectory]
+  mynotes,secret123
+  worknotes,pass456,backup
+        """
+    )
+
+    parser.add_argument(
+        "site_id",
+        nargs="?",
+        metavar="SITE_ID",
+        help="Site ID to export (single-site mode)",
+    )
+    parser.add_argument(
+        "--import", "-import",
+        dest="import_csv",
+        metavar="FILE",
+        help="CSV file to batch-export (columns: siteId, password[, masterDir])",
+    )
+
+    args = parser.parse_args()
+
+    # --- Batch mode ---
+    if args.import_csv:
+        import_from_csv(args.import_csv)
+        return
+
+    # --- Single-site mode ---
+    site_id = args.site_id
+    if not site_id:
+        site_id = input("Enter site ID: ").strip()
+    if not site_id:
+        print("Error: site ID cannot be empty.")
+        sys.exit(1)
+
+    password = getpass.getpass(f"Password for '{site_id}': ")
+    if not password:
+        print("Error: password cannot be empty.")
+        sys.exit(1)
+
+    ok = export_one_site(site_id, password)
+    if not ok:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
