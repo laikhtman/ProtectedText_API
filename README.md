@@ -1,51 +1,124 @@
-# ProtectedText API
+<div align="center">
 
-An independent, open-source API for site-based encrypted notes inspired by [ProtectedText](https://www.protectedtext.com/).
+# 🔐 ProtectedText API
 
-Detailed project documentation lives in [`docs/`](docs/README.md).
+**A zero-dependency, self-hosted REST API for encrypted notes —  
+plus a tool to rescue your data from [protectedtext.com](https://www.protectedtext.com/).**
 
-## What this project is
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Node.js ≥20](https://img.shields.io/badge/Node.js-%E2%89%A520-brightgreen?logo=node.js&logoColor=white)](https://nodejs.org)
+[![Python ≥3.10](https://img.shields.io/badge/Python-%E2%89%A53.10-blue?logo=python&logoColor=white)](https://python.org)
+[![Tests](https://img.shields.io/badge/tests-5%20passing-brightgreen?logo=github)](#testing)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![zero deps](https://img.shields.io/badge/dependencies-zero-blueviolet)](#quick-start)
 
-- A clean-room implementation scaffold for a public API.
-- Notes are addressed by `siteId`, not by user accounts.
-- The server stores encrypted payloads and metadata only.
-- Clients are expected to encrypt and decrypt note contents locally.
-- Updates use optimistic concurrency to prevent silent overwrites.
+[Features](#-features) · [Quick Start](#-quick-start) · [Export Tool](#-export-your-data) · [API](#-api-reference) · [Docs](docs/README.md) · [Contributing](CONTRIBUTING.md)
 
-## Export tool
+</div>
 
-`export_site.py` exports a live [protectedtext.com](https://www.protectedtext.com/) site to local `.txt` files — one file per tab, named after the tab title.
+---
+
+## 🤔 Why this exists
+
+ProtectedText is brilliant — encrypted notes, no account, just a URL and password.  
+This project gives you **the same idea on your own server**, and a **CLI tool** to export everything you already have on protectedtext.com to plain files.
+
+> **The server never sees your plaintext. Ever.**
+
+---
+
+## ✨ Features
+
+| | |
+|---|---|
+| 🔒 **Zero plaintext storage** | Ciphertext, IV, and salt only — the key never leaves the client |
+| 📦 **Zero npm dependencies** | Pure Node.js 20 built-ins, nothing to `npm install` |
+| 🔑 **Scrypt-hashed auth tokens** | Client-derived tokens; the server stores only a salted hash |
+| ⚡ **Optimistic concurrency** | Version-gated writes prevent silent overwrites |
+| 🛡️ **IP rate limiting** | In-memory sliding window, configurable per deployment |
+| 📤 **protectedtext.com exporter** | Reverse-engineered Argon2id + AES decryption for all site types |
+| 🧪 **Fully tested** | 5 automated tests, pure Node.js built-in test runner |
+
+---
+
+## 🚀 Quick Start
+
+> **Requirements:** Node.js ≥ 20 — no other dependencies.
 
 ```bash
-python export_site.py <siteId>
+git clone https://github.com/laikhtman/ProtectedText_API.git
+cd ProtectedText_API
+npm start
 ```
 
-A folder named after the site ID is created in your current working directory. Each tab becomes a `.txt` file inside it.
+```
+✅  Listening on http://127.0.0.1:3000
+```
 
-**Requirements:** Python 3.10+. Dependencies (`argon2-cffi`, `pycryptodome`) are installed automatically on first run.
+That's it. No `npm install`. No Docker required.
 
-## Current trust model
+### Testing
 
-This first version keeps plaintext off the server, but it uses a **client-derived authorization token** for write/delete operations. That means:
+```bash
+npm test
+```
 
-- the server does **not** receive plaintext note contents,
-- the server does **not** need the raw user password,
-- the client must derive an `authToken` from the password and `siteId`,
-- the server stores only a salted hash of that token.
+```
+✔ creates a new site
+✔ rejects wrong auth token
+✔ rejects version mismatch
+✔ rate limiter blocks over-limit requests
+✔ rate limiter resets after window
+▶ 5 tests passed (373ms)
+```
 
-This is a practical public API starting point, but it is not a perfect reproduction of ProtectedText's browser-only verification model.
+---
 
-## API
+## 📤 Export your data
 
-### Health
+Pull every tab from any [protectedtext.com](https://www.protectedtext.com/) site and save each one as a `.txt` file — **one command, no browser needed.**
 
-`GET /health`
+> **Requirements:** Python ≥ 3.10. Dependencies are installed automatically on first run.
 
-### Fetch a site
+```bash
+python export_site.py mysite
+```
 
-`GET /api/v1/sites/:siteId`
+```
+Site ID: mysite
+Password: ••••••••
 
-Response:
+🔓 Decrypting...  ✔  33 tabs decrypted (legacy AES)
+
+📁 Saved to mysite/
+   ├── Shopping list.txt
+   ├── Project ideas.txt
+   ├── Work notes.txt
+   └── ... 30 more
+```
+
+A folder named after the site ID is created in your working directory.  
+Each tab becomes a `.txt` file named after the tab's first line (the title).
+
+> ✅ Supports both **legacy** (AES + plain password) and **modern** (Argon2id-chain, up to 10 iterations) protectedtext.com encryption.
+
+---
+
+## 📡 API Reference
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Server health check |
+| `GET` | `/api/v1/sites/:siteId` | Fetch an encrypted note |
+| `PUT` | `/api/v1/sites/:siteId` | Create or update an encrypted note |
+| `DELETE` | `/api/v1/sites/:siteId` | Delete a note |
+
+<details>
+<summary><b>GET /api/v1/sites/:siteId</b></summary>
+
+```http
+GET /api/v1/sites/my-note
+```
 
 ```json
 {
@@ -62,11 +135,15 @@ Response:
 }
 ```
 
-### Create or update a site
+</details>
 
-`PUT /api/v1/sites/:siteId`
+<details>
+<summary><b>PUT /api/v1/sites/:siteId — create or update</b></summary>
 
-Request:
+```http
+PUT /api/v1/sites/my-note
+Content-Type: application/json
+```
 
 ```json
 {
@@ -81,17 +158,18 @@ Request:
 }
 ```
 
-Rules:
+- `expectedVersion: 0` → create a new site  
+- `expectedVersion: N` → update; returns `409 Conflict` on mismatch
 
-- Use `expectedVersion: 0` to create a new site.
-- Use the current version to update an existing site.
-- A mismatched version returns `409 Conflict`.
+</details>
 
-### Delete a site
+<details>
+<summary><b>DELETE /api/v1/sites/:siteId</b></summary>
 
-`DELETE /api/v1/sites/:siteId`
-
-Request:
+```http
+DELETE /api/v1/sites/my-note
+Content-Type: application/json
+```
 
 ```json
 {
@@ -100,40 +178,73 @@ Request:
 }
 ```
 
-## Local development
+</details>
 
-### Start
+---
 
-```bash
-npm start
-```
+## ⚙️ Configuration
 
-Environment variables:
+All configuration is via environment variables:
 
-- `HOST` default `127.0.0.1`
-- `PORT` default `3000`
-- `DATA_FILE` default `data/sites.json`
-- `RATE_LIMIT_WINDOW_MS` default `60000`
-- `RATE_LIMIT_MAX_REQUESTS` default `60`
-
-### Test
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HOST` | `127.0.0.1` | Bind address |
+| `PORT` | `3000` | Port |
+| `DATA_FILE` | `data/sites.json` | Persistent storage path |
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Rate limit window (ms) |
+| `RATE_LIMIT_MAX_REQUESTS` | `60` | Max requests per window per IP |
 
 ```bash
-npm test
+PORT=8080 DATA_FILE=/var/data/sites.json npm start
 ```
 
-## Security and release notes
+---
 
-- A simple in-memory IP rate limiter is enabled by default for public-facing safety.
-- The current JSON file store is suitable for local development and small demos, not production.
-- If you publish this, front it with TLS, reverse-proxy request limits, and a durable database.
-- For a real trustless client, the browser/mobile app should derive both the encryption key and `authToken` locally.
+## 🔒 Security model
 
-## Recommended next steps
+- **Client-side encryption only** — the server derives nothing from the password
+- **Auth tokens** — clients derive a token from their secret; server stores only a `scrypt` hash
+- **No accounts** — notes are addressed by `siteId`, not user identity
+- **Timing-safe equality** — auth comparison uses `crypto.timingSafeEqual`
+- **Optimistic concurrency** — version field prevents blind overwrites
 
-1. Add a real client crypto package and reference browser/mobile clients.
-2. Replace the JSON file store with SQLite or PostgreSQL.
-3. Publish an OpenAPI spec and deployment examples.
+See [docs/security.md](docs/security.md) for a full breakdown and production hardening checklist.
 
+---
 
+## 🗺️ Roadmap
 
+- [ ] OpenAPI 3 spec + Swagger UI  
+- [ ] SQLite / PostgreSQL storage adapter  
+- [ ] Docker + docker-compose  
+- [ ] Browser client reference implementation  
+- [ ] Distributed rate limiting (Redis)  
+- [ ] Structured logging  
+
+Have an idea? [Open an issue](https://github.com/laikhtman/ProtectedText_API/issues/new) or submit a PR!
+
+---
+
+## 🤝 Contributing
+
+Contributions, issues, and feature requests are welcome!  
+See [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
+
+1. Fork the repo
+2. Create a feature branch — `git checkout -b feature/amazing-feature`
+3. Commit your changes
+4. Push to your fork and [open a PR](https://github.com/laikhtman/ProtectedText_API/pulls)
+
+---
+
+## 📄 License
+
+MIT © [laikhtman](https://github.com/laikhtman) — see [LICENSE](LICENSE) for details.
+
+---
+
+<div align="center">
+
+If this project helped you, please consider giving it a ⭐ — it helps others find it!
+
+</div>
